@@ -84,6 +84,56 @@ def purged_walk_forward_splits(
         yield train_idx, test_idx
 
 
+def purged_walk_forward_date_splits(
+    dates:    pd.Series | pd.Index | np.ndarray,
+    n_splits: int = 6,
+    horizon:  int = 5,
+    embargo:  int = 10,
+    min_train_size: float = 0.50,
+) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    """
+    Walk-forward purged CV para un PANEL (varias filas por fecha).
+
+    `purged_walk_forward_splits` purga y embarga por número de FILAS. En un
+    panel con ~30 tickers por fecha, purgar 5 + 10 filas equivale a menos de
+    un día, y train y test llegan a compartir fechas. Esta versión trabaja
+    sobre fechas únicas: `horizon` y `embargo` se miden en días hábiles.
+
+    Con el test empezando en la fecha de posición `s`, una fila de train en
+    la posición j tiene una etiqueta que usa precios hasta j + horizon, así
+    que se exige j + horizon < s, más `embargo` días de separación:
+        j < s - horizon - embargo
+
+    Args:
+        dates: fecha de cada fila (no necesita estar ordenado).
+        Resto: igual que `purged_walk_forward_splits`, pero en días.
+
+    Yields:
+        (train_idx, test_idx) como posiciones de fila. Fold 0 = el más reciente.
+    """
+    row_dates = pd.to_datetime(pd.Series(np.asarray(dates)))
+    unique = np.sort(row_dates.unique())
+    pos = pd.Series(np.arange(len(unique)), index=unique)
+    row_pos = pos.reindex(row_dates.values).to_numpy()
+
+    m = len(unique)
+    test_size = int(m * (1 - min_train_size) / n_splits)
+    if test_size < 1:
+        test_size = max(1, m // (n_splits + 2))
+
+    for fold in range(n_splits):
+        test_end = m - fold * test_size
+        test_start = test_end - test_size
+        if test_start < 0:
+            break
+        train_cut = test_start - horizon - embargo
+        if train_cut <= 10:
+            continue
+        train_idx = np.flatnonzero(row_pos < train_cut)
+        test_idx = np.flatnonzero((row_pos >= test_start) & (row_pos < test_end))
+        yield train_idx, test_idx
+
+
 def compute_embargo_size(n: int, pct: float = 0.01) -> int:
     """Tamaño del embargo como porcentaje del dataset (López de Prado recomienda 1%)."""
     return max(1, int(n * pct))
