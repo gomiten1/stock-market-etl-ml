@@ -39,7 +39,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.data.store import get as store_get, BMV_TICKERS, MACRO_TICKERS
 from src.ml.features import (
-    compute_features, add_macro_features,
+    compute_features, add_macro_features, add_cross_section_features,
     TECH_FEATURE_COLS, MACRO_FEATURE_COLS,
 )
 from src.ml.woe import compute_all_woe, woe_transform, iv_summary
@@ -84,7 +84,8 @@ naftrac_df = macro.get("NAFTRAC")
 sp500_df   = macro.get("SP500")
 
 raw_ohlcv: dict[str, pd.DataFrame] = {}  # para ROCKET multicanal
-rows = []
+# Pasada 1: features por ticker (técnicos + macro).
+frames: dict[str, pd.DataFrame] = {}
 for name in BMV_TICKERS:
     df = store_get(name)
     if df is None or len(df) < PRICE_WINDOW + 50:
@@ -92,13 +93,25 @@ for name in BMV_TICKERS:
     raw_ohlcv[name] = df.copy()
     feat = compute_features(df)
     feat = add_macro_features(feat, macro)
+    frames[name] = feat
+
+# Pasada 2: features cross-seccionales (cs_*), que comparan cada ticker
+# contra el universo en la misma fecha y requieren todos los tickers.
+frames = add_cross_section_features(frames)
+
+rows = []
+for name, feat in frames.items():
+    df = raw_ohlcv[name]
+    fwd = df["Close"].shift(-HORIZON) / df["Close"] - 1
     feat["ticker"]  = name
-    feat["y"]       = (df["Close"].shift(-HORIZON) / df["Close"] - 1 >= TARGET_RET).astype(int)
-    feat["ret_fwd"] = (df["Close"].shift(-HORIZON) / df["Close"] - 1) * 100
+    # Sin precio futuro (últimos días) no hay etiqueta: NaN, no 0.
+    feat["y"]       = (fwd >= TARGET_RET).astype(float).where(fwd.notna())
+    feat["ret_fwd"] = fwd * 100
     rows.append(feat)
 
 all_df = pd.concat(rows).sort_index()
 all_df = all_df.dropna(subset=FEATURE_COLS + ["y"])
+all_df["y"] = all_df["y"].astype(int)
 print(f"   {len(all_df):,} obs  |  {all_df.index.min().date()} → {all_df.index.max().date()}")
 
 # ─── 2. Corte temporal 80/20 ─────────────────────────────────────────────────

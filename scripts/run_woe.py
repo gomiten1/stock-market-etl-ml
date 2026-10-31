@@ -25,7 +25,9 @@ import yfinance as yf
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.ml.features import compute_features, FEATURE_COLS, add_macro_features
+from src.ml.features import (
+    compute_features, FEATURE_COLS, add_macro_features, add_cross_section_features,
+)
 from src.ml.woe import compute_all_woe, iv_summary
 from src.data.store import get as store_get
 
@@ -56,27 +58,44 @@ def build_dataset() -> pd.DataFrame:
         "SP500":   store_get("SP500"),
     }
 
-    rows: list[pd.DataFrame] = []
+    # Pasada 1: features por ticker (técnicos + macro).
+    # Las features cs_* comparan cada ticker contra el universo en la misma
+    # fecha, así que no se pueden calcular aquí: necesitan todos los tickers.
+    frames: dict[str, pd.DataFrame] = {}
+    raws: dict[str, pd.DataFrame] = {}
 
     for ticker in TICKERS:
-        print(f"  {ticker:<12} ...", end=" ", flush=True)
         try:
             raw = store_get(ticker)
             if raw is None or len(raw) < WARMUP + HORIZON + 10:
-                print("SKIP"); continue
+                print(f"  {ticker:<12} ... SKIP")
+                continue
             raw = raw[raw.index >= start]
-
             df = compute_features(raw)
             df = add_macro_features(df, macro)
+            frames[ticker] = df
+            raws[ticker] = raw
+        except Exception as e:
+            print(f"  {ticker:<12} ... ERROR: {e}")
 
+    # Pasada 2: features cross-seccionales con el universo completo.
+    frames = add_cross_section_features(frames)
+
+    rows: list[pd.DataFrame] = []
+    for ticker, df in frames.items():
+        print(f"  {ticker:<12} ...", end=" ", flush=True)
+        try:
+            raw = raws[ticker]
             entry  = raw["Open"].shift(-1)
             exit_  = raw["Close"].shift(-(HORIZON + 1))
             df["target_ret"] = (exit_ - entry) / (entry + 1e-8) * 100
-            df["y"]          = (df["target_ret"] > 0).astype(int)
+            # Sin precio futuro (últimos días) no hay etiqueta: NaN, no 0.
+            df["y"] = (df["target_ret"] > 0).astype(float).where(df["target_ret"].notna())
 
             df["ticker"] = ticker
             df = df.dropna(subset=["y"] + FEATURE_COLS[:10])
             df = df.iloc[WARMUP:]
+            df["y"] = df["y"].astype(int)
 
             rows.append(df[["ticker", "y", "target_ret"] + FEATURE_COLS])
             print(f"{len(df):,} obs")
